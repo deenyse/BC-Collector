@@ -258,27 +258,137 @@ app.delete('/api/qa/:id', async (req, res) => {
     }
 });
 
-// Debug-tree route (cross-platform)
-app.get('/debug-tree', (req, res) => {
+// === УЛУЧШЕННЫЙ ДЕБАГ-МАРШРУТ ===
+app.get('/debug', (req, res) => {
     const isWindows = process.platform === 'win32';
-    const root = process.env.RENDER ? '/opt/render/project' : process.cwd();
-    const cmd = isWindows ? `dir /s "${root}"` : `tree -L 3 "${root}"`;
+    const cwd = process.cwd();
+    const root = process.env.RENDER ? '/opt/render/project/src' : cwd;
+    const possibleFrontendPaths = [
+        path.join(cwd, '..', '..', 'src', 'frontend', 'dist'),
+        path.join(cwd, 'src', 'frontend', 'dist'),
+        path.join(cwd, '..', 'frontend', 'dist'),
+        path.join(cwd, 'frontend', 'dist'),
+        path.join(cwd, 'dist'),
+        path.join(root, 'src', 'frontend', 'dist'),
+        path.join(root, 'frontend', 'dist'),
+        '/opt/render/project/src/frontend/dist',
+        '/app/src/frontend/dist',
+        '/app/dist',
+    ];
 
-    exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+    const results = [];
+    const indexPaths = [];
+
+    // Проверяем каждый путь
+    possibleFrontendPaths.forEach((dir, i) => {
+        const exists = fs.existsSync(dir);
+        const indexPath = path.join(dir, 'index.html');
+        const indexExists = fs.existsSync(indexPath);
+
+        results.push({
+            [`Path #${i+1}`]: dir,
+            'Exists': exists ? 'YES' : 'NO',
+            'index.html': indexExists ? 'FOUND' : 'NOT FOUND',
+            'Full index path': indexPath,
+        });
+
+        if (indexExists) {
+            indexPaths.push(indexPath);
+        }
+    });
+
+    // Читаем содержимое ключевых папок
+    const listDir = (dir, label) => {
+        try {
+            if (!fs.existsSync(dir)) return `${label}: [DIR NOT FOUND]`;
+            const items = fs.readdirSync(dir);
+            return `${label}: [ ${items.length} items: [${items.slice(0, 20).join(', ')}${items.length > 20 ? '...' : ''}]`;
+        } catch (e) {
+            return `${label}: [ERROR READING] ${e.message}`;
+        }
+    };
+
+    const keyDirs = [
+        [cwd, 'process.cwd()'],
+        [path.dirname(__dirname), '__dirname parent'],
+        [__dirname, '__dirname'],
+        [root, 'RENDER root'],
+        ['/opt/render/project/src', 'Render /opt/.../src'],
+        ['/app', '/app (common in containers)'],
+    ].map(([dir, label]) => listDir(dir, label));
+
+    // Попробуем найти index.html рекурсивно (ограничим глубину)
+    const findIndexHtml = () => {
+        const seen = new Set();
+        const search = (dir, depth = 0) => {
+            if (depth > 4 || seen.has(dir)) return [];
+            seen.add(dir);
+            let found = [];
+            try {
+                const items = fs.readdirSync(dir);
+                if (items.includes('index.html')) {
+                    found.push(path.join(dir, 'index.html'));
+                }
+                for (const item of items) {
+                    const full = path.join(dir, item);
+                    if (fs.statSync(full).isDirectory()) {
+                        found = found.concat(search(full, depth + 1));
+                    }
+                }
+            } catch (_) {}
+            return found;
+        };
+        return search('/opt/render/project/src', 0)
+            .concat(search(cwd, 0))
+            .concat(search('/app', 0))
+            .slice(0, 10);
+    };
+
+    const foundIndexFiles = findIndexHtml();
+
+    // Попытка выполнить `ls` или `dir`
+    const execCmd = isWindows ? 'dir' : 'ls -la';
+    exec(execCmd, { timeout: 5000 }, (err, stdout, stderr) => {
+        const output = err ? `ERROR: ${err.message}\n${stderr}` : stdout;
+
         res.type('text/plain');
-        res.send(
-`🖥️  SERVER STARTED: ${new Date().toLocaleString()}
-🌍  process.cwd() = ${process.cwd()}
-${isWindows ? '💻 Windows' : '💻 Unix/Linux'}
+        res.send(`
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                               SERVER DEBUG INFO                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-📂  EXECUTING: ${cmd}
-${'-'.repeat(50)}
-${err ? `ERROR: ${err.message}\nSTDERR: ${stderr}` : stdout}
-${'-'.repeat(50)}
-📍  frontendDir = ${frontendDir}
-${fs.existsSync(path.join(frontendDir, 'index.html')) ? '✅ index.html FOUND' : '❌ index.html NOT FOUND'}
-`
-        );
+Server Time: ${new Date().toLocaleString()}
+Platform: ${process.platform} (${isWindows ? 'Windows' : 'Unix'})
+Node.js: ${process.version}
+Environment: ${process.env.NODE_ENV || 'development'}
+RENDER: ${!!process.env.RENDER}
+process.cwd(): ${cwd}
+__dirname: ${__dirname}
+frontendDir (original): ${frontendDir}
+fs.existsSync(frontendDir): ${fs.existsSync(frontendDir) ? 'YES' : 'NO'}
+index.html exists: ${fs.existsSync(path.join(frontendDir, 'index.html')) ? 'YES' : 'NO'}
+
+DIRECTORY LISTINGS:
+${keyDirs.join('\n')}
+
+POSSIBLE FRONTEND DIST PATHS:
+${results.map(r => Object.entries(r).map(([k, v]) => `  ${k.padEnd(20)}: ${v}`).join('\n')).join('\n\n')}
+
+FOUND index.html (recursive search):
+${foundIndexFiles.length > 0 ? foundIndexFiles.map(p => `  FOUND: ${p}`).join('\n') : '  NONE FOUND'}
+
+EXEC: ${execCmd} (current dir)
+${'-'.repeat(60)}
+${output}
+${'-'.repeat(60)}
+
+TIPS:
+• Если index.html найден — обнови frontendDir в коде
+• На Render: фронтенд должен быть в /opt/render/project/src/frontend/dist
+• Убедись, что в package.json есть скрипт build и dist попадает в репозиторий
+• Или используй Render Build Command: "npm run build:frontend && npm run start"
+
+`);
     });
 });
 
