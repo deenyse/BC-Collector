@@ -67,7 +67,7 @@ app.use((req, res, next) => {
 
 // Static: uploads and frontend
 app.use('/uploads', express.static(uploadsDir));
-const frontendDir = path.join(__dirname, '..', 'BC-Collector', 'frontend');
+const frontendDir = path.join(__dirname, '..', 'BC-Collector', 'frontend', 'dist');
 app.use('/', express.static(frontendDir));
 app.get('*', (req, res) => {
     res.sendFile(path.join(frontendDir, 'index.html'));
