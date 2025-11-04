@@ -67,9 +67,11 @@ app.use((req, res, next) => {
 
 // Static: uploads and frontend
 app.use('/uploads', express.static(uploadsDir));
-const frontendDir = path.join(__dirname, '..', 'frontend');
+const frontendDir = path.join(__dirname, '..', 'frontend', 'dist');
 app.use('/', express.static(frontendDir));
-
+app.get('*', (req, res) => {
+    res.sendFile(path.join(frontendDir, 'index.html'));
+});
 // Simple CDN proxy with in-memory cache to avoid CORB for pdf.js
 const cdnCache = {};
 function fetchCdnOnce(url, contentType) {
