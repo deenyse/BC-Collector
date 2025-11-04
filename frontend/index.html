@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BC Collectors - Parsers in RAG</title>
+    <!-- Tailwind via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- pdf.js via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf_viewer.min.css" />
+    <!-- docx-preview via CDN -->
+    <script src="https://unpkg.com/docx-preview@0.3.4/dist/docx-preview.min.js"></script>
+    <style>
+        .viewer {
+            height: 70vh;
+            overflow: auto;
+            background: #fafafa;
+            border: 1px solid #e5e7eb;
+        }
+        .text-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 2; /* ensure above canvas for selection */
+        }
+        .text-layer div {
+            position: absolute;
+            white-space: pre;
+            transform-origin: 0% 0%;
+        }
+    </style>
+    <script>
+        window.API_BASE = '';
+        // When served from Express root, empty base keeps same origin.
+
+        function loadScriptOnce(src) {
+            return new Promise((resolve, reject) => {
+                // already loaded?
+                const existing = Array.from(document.scripts).find((s) => s.src.endsWith(src));
+                if (existing) {
+                    if (existing.dataset.loaded === 'true') return resolve();
+                    existing.addEventListener('load', () => resolve());
+                    existing.addEventListener('error', reject);
+                    return;
+                }
+                const s = document.createElement('script');
+                s.src = src;
+                s.async = true;
+                s.crossOrigin = 'anonymous';
+                s.referrerPolicy = 'no-referrer';
+                s.addEventListener('load', () => {
+                    s.dataset.loaded = 'true';
+                    resolve();
+                });
+                s.addEventListener('error', reject);
+                document.head.appendChild(s);
+            });
+        }
+
+        async function ensurePdfJs() {
+            window.onDebug && window.onDebug('ensurePdfJs:start');
+            if (!window.pdfjsLib) {
+                try {
+                    await loadScriptOnce('/vendor/pdf.min.js');
+                    window.onDebug && window.onDebug('ensurePdfJs:loadedLib');
+                } catch (e) {
+                    window.onDebug && window.onDebug('ensurePdfJs:error', { message: e && e.message });
+                    throw e;
+                }
+            }
+            if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+                window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.js';
+                window.onDebug && window.onDebug('ensurePdfJs:setWorker');
+            }
+        }
+        window.ensurePdfJs = ensurePdfJs;
+        // simple debug helper
+        window.debug = function(event, data) {
+            try { if (window.onDebug) window.onDebug(event, data); } catch (e) {}
+            try { console.debug('[DEBUG]', event, data || ''); } catch (e) {}
+        }
+    </script>
+</head>
+<body class="bg-gray-50">
+    <!-- Fullscreen Login -->
+    <div id="loginScreen" class="fixed inset-0 bg-gray-50 flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full mx-4">
+            <h1 class="text-2xl font-semibold mb-6 text-center">BC Collectors</h1>
+            <h2 class="text-lg font-medium mb-4 text-center">Using Parsers in RAG</h2>
+            <div class="space-y-4">
+                <div>
+                    <label for="loginUsername" class="text-sm text-gray-700 block mb-1">Username</label>
+                    <input id="loginUsername" class="w-full border rounded p-2" placeholder="user1 or user2" autocomplete="username" />
+                </div>
+                <div>
+                    <label for="loginPassword" class="text-sm text-gray-700 block mb-1">Password</label>
+                    <input id="loginPassword" type="password" class="w-full border rounded p-2" placeholder="user1 or user2" autocomplete="current-password" />
+                </div>
+                <div>
+                    <button id="loginBtn" class="w-full px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Sign in</button>
+                </div>
+            </div>
+            <div id="loginMsg" class="text-sm text-gray-600 mt-4 text-center"></div>
+        </div>
+    </div>
+    
+    <!-- Main Content (hidden until logged in) -->
+    <div id="mainContent" class="max-w-7xl mx-auto p-4 space-y-4 hidden">
+        <div class="bg-white p-4 rounded shadow flex items-center justify-between">
+            <div class="font-medium">BC Collectors: Using Parsers in RAG</div>
+            <div class="flex items-center gap-2 text-sm">
+                <span id="authStatus">Not signed in</span>
+                <button id="logoutBtn" class="px-2 py-1 border rounded">Logout</button>
+            </div>
+        </div>
+        <!-- Upload & Files -->
+        <div class="bg-white p-4 rounded shadow">
+            <form id="uploadForm" class="flex items-center gap-4" enctype="multipart/form-data">
+                <label for="fileInput" class="sr-only">Upload file</label>
+                <input id="fileInput" type="file" name="file" accept=".pdf,.docx" class="block" />
+                <button class="px-4 py-2 bg-blue-600 text-white rounded" type="submit">Upload</button>
+                <span id="uploadMsg" class="text-sm text-gray-600"></span>
+            </form>
+        </div>
+
+        <div class="bg-white p-4 rounded shadow">
+            <h2 class="font-medium mb-2">Files</h2>
+            <div class="overflow-x-auto">
+                <table class="min-w-full text-sm">
+                    <thead>
+                        <tr class="text-left border-b">
+                            <th class="py-2 pr-4">Filename</th>
+                            <th class="py-2 pr-4">Uploaded</th>
+                            <th class="py-2 pr-4">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="filesTable"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Main layout -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Q&A panel -->
+            <div class="md:col-span-2">
+                <h2 class="font-medium mb-2">Create Q&A</h2>
+                <div class="bg-white p-4 rounded shadow space-y-3">
+                    <div class="text-sm text-gray-600">Current file: <span id="currentFileName" class="font-medium">None</span></div>
+                    <div>
+                        <label for="selectedText" class="text-sm text-gray-700">Selected text</label>
+                        <textarea id="selectedText" class="w-full border rounded p-2 mt-1" rows="5" placeholder="Paste text from your locally opened document"></textarea>
+                    </div>
+                    <div>
+                        <label for="question" class="text-sm text-gray-700">Question</label>
+                        <input id="question" class="w-full border rounded p-2 mt-1" placeholder="Enter question" />
+                    </div>
+                    <div>
+                        <label for="answer" class="text-sm text-gray-700">Answer</label>
+                        <textarea id="answer" class="w-full border rounded p-2 mt-1" rows="4" placeholder="Enter answer"></textarea>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <button id="saveQA" class="px-4 py-2 bg-green-600 text-white rounded">Save Q&A</button>
+                        <span id="qaMsg" class="text-sm text-gray-600"></span>
+                    </div>
+                </div>
+                <div class="mt-4 bg-white p-4 rounded shadow">
+                    <h3 class="font-medium mb-2">Q&A Pairs</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full text-sm">
+                            <thead>
+                                <tr class="text-left border-b">
+                                    <th class="py-2 pr-4">Snippet</th>
+                                    <th class="py-2 pr-4">Question</th>
+                                    <th class="py-2 pr-4">Answer</th>
+                                    <th class="py-2">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="qaTable"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="mt-4 bg-white p-4 rounded shadow">
+                    <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-2 mb-2">
+                        <h3 class="font-medium">All Q&A</h3>
+                        <div class="flex flex-wrap gap-2 items-end">
+                            <button id="downloadJsonBtn" class="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700">Download JSON</button>
+                            <div>
+                                <label for="qaFileFilter" class="text-sm text-gray-700">Filter by file</label>
+                                <select id="qaFileFilter" class="border rounded p-1 ml-2">
+                                    <option value="">All files</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="qaUserFilter" class="text-sm text-gray-700">Filter by user</label>
+                                <select id="qaUserFilter" class="border rounded p-1 ml-2">
+                                    <option value="">All users</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="qaSort" class="text-sm text-gray-700">Sort</label>
+                                <select id="qaSort" class="border rounded p-1 ml-2">
+                                    <option value="date_desc">Date added (newest)</option>
+                                    <option value="date_asc">Date added (oldest)</option>
+                                    <option value="file_asc">File (A→Z)</option>
+                                    <option value="file_desc">File (Z→A)</option>
+                                </select>
+                            </div>
+                            <div class="text-sm text-gray-600">Files: <span id="qaFilesCount">0</span></div>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full text-sm">
+                            <thead>
+                                <tr class="text-left border-b">
+                                    <th class="py-2 pr-4">File</th>
+                                    <th class="py-2 pr-4">Snippet</th>
+                                    <th class="py-2 pr-4">Question</th>
+                                    <th class="py-2 pr-4">Answer</th>
+                                    <th class="py-2 pr-4">Added</th>
+                                </tr>
+                            </thead>
+                            <tbody id="qaAllTable"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- End Main Content -->
+
+    
+</body>
+<script>
+// Simple state
+let currentFile = null;
+
+async function fetchFiles() {
+    window.debug('files:list:start');
+    const res = await fetch(`${window.API_BASE}/api/files`);
+    const files = await res.json();
+    const tbody = document.getElementById('filesTable');
+    tbody.innerHTML = '';
+    files.forEach((f) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b';
+        const uploaded = new Date(f.uploadedAt).toLocaleString();
+        tr.innerHTML = `
+            <td class="py-2 pr-4">${escapeHtml(f.filename)}</td>
+            <td class="py-2 pr-4">${escapeHtml(uploaded)}</td>
+            <td class="py-2 pr-4 space-x-2">
+                <button class="selectFile px-2 py-1 border rounded hover:bg-gray-100" data-id="${f._id}">Select</button>
+                <a class="downloadFile px-2 py-1 border rounded hover:bg-gray-100" href="${f.filepath}" download>Download</a>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+    tbody.querySelectorAll('.selectFile').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-id');
+            const f = files.find((x) => x._id === id);
+            if (f) selectFile(f);
+        });
+    });
+    window.debug('files:list:done', { count: files.length });
+}
+
+function setSelectionCapture(container) {
+    function handleSelection() {
+        const sel = (container.getRootNode().getSelection?.() || window.getSelection());
+        const text = sel ? sel.toString().trim() : '';
+        if (text) document.getElementById('selectedText').value = text;
+    }
+    container.addEventListener('mouseup', handleSelection);
+    container.addEventListener('touchend', handleSelection);
+}
+
+async function renderPDF(url) {
+    const viewer = document.getElementById('viewer');
+    viewer.innerHTML = '';
+    try {
+        window.debug('pdf:render:start', { url });
+        await window.ensurePdfJs();
+        const pdf = await pdfjsLib.getDocument(url).promise;
+        for (let p = 1; p <= Math.min(pdf.numPages, 3); p++) { // render first 3 pages for simplicity
+            window.debug('pdf:page:start', { page: p });
+            const page = await pdf.getPage(p);
+            const viewport = page.getViewport({ scale: 1.2 });
+            const pageDiv = document.createElement('div');
+            pageDiv.className = 'relative mx-auto my-2';
+            pageDiv.style.width = viewport.width + 'px';
+            pageDiv.style.height = viewport.height + 'px';
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            canvas.style.width = viewport.width + 'px';
+            canvas.style.height = viewport.height + 'px';
+            pageDiv.appendChild(canvas);
+
+            // text layer
+            const textLayerDiv = document.createElement('div');
+            textLayerDiv.className = 'text-layer';
+            textLayerDiv.style.width = viewport.width + 'px';
+            textLayerDiv.style.height = viewport.height + 'px';
+            pageDiv.appendChild(textLayerDiv);
+
+            viewer.appendChild(pageDiv);
+
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            const textContent = await page.getTextContent();
+            // Build selectable text layer
+            textContent.items.forEach((item) => {
+                const span = document.createElement('div');
+                span.textContent = item.str;
+                const ts = pdfjsLib.Util.transform(viewport.transform, item.transform);
+                const x = ts[4];
+                const y = ts[5] - item.height;
+                span.style.left = x + 'px';
+                span.style.top = y + 'px';
+                span.style.fontSize = item.height + 'px';
+                span.style.transform = `scaleX(${ts[0]})`;
+                span.style.pointerEvents = 'auto';
+                textLayerDiv.appendChild(span);
+            });
+            window.debug('pdf:page:done', { page: p });
+        }
+        setSelectionCapture(viewer);
+        window.debug('pdf:render:done');
+    } catch (err) {
+        const errorBox = document.createElement('div');
+        errorBox.className = 'p-4 text-red-700 bg-red-50 border border-red-200 rounded';
+        errorBox.textContent = 'Failed to open PDF. ' + (err && err.message ? err.message : '');
+        viewer.appendChild(errorBox);
+        console.error('PDF render error:', err);
+        window.debug('pdf:render:error', { message: err && err.message });
+    }
+}
+
+async function renderDOCX(url) {
+    const viewer = document.getElementById('viewer');
+    viewer.innerHTML = '';
+    try {
+        window.debug('docx:render:start', { url });
+        const container = document.createElement('div');
+        container.className = 'p-4';
+        viewer.appendChild(container);
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const blob = await res.blob();
+        await window.docx.renderAsync(blob, container, container, { inWrapper: false });
+        setSelectionCapture(container);
+        window.debug('docx:render:done');
+    } catch (err) {
+        const errorBox = document.createElement('div');
+        errorBox.className = 'p-4 text-red-700 bg-red-50 border border-red-200 rounded';
+        errorBox.textContent = 'Failed to open DOCX. ' + (err && err.message ? err.message : '');
+        viewer.appendChild(errorBox);
+        console.error('DOCX render error:', err);
+        window.debug('docx:render:error', { message: err && err.message });
+    }
+}
+
+async function selectFile(file) {
+    currentFile = file;
+    window.debug('file:select', { id: file._id, name: file.filename });
+    document.getElementById('currentFileName').textContent = file.filename;
+    document.getElementById('selectedText').value = '';
+    document.getElementById('question').value = '';
+    document.getElementById('answer').value = '';
+    await loadQAs();
+}
+
+async function loadQAs() {
+    const tbody = document.getElementById('qaTable');
+    tbody.innerHTML = '';
+    if (!currentFile) return;
+    window.debug('qa:list:start', { fileId: currentFile._id });
+    const res = await fetch(`${window.API_BASE}/api/qa/${currentFile._id}`);
+    const list = await res.json();
+    list.forEach((qa) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b align-top';
+        const snippet = qa.textPiece.length > 100 ? qa.textPiece.slice(0, 100) + '…' : qa.textPiece;
+        const creator = qa.createdBy && qa.createdBy.username ? ` · ${qa.createdBy.username}` : '';
+        tr.innerHTML = `
+            <td class="py-2 pr-4">${escapeHtml(snippet)}</td>
+            <td class="py-2 pr-4">${escapeHtml(qa.question)}${escapeHtml(creator)}</td>
+            <td class="py-2 pr-4">${escapeHtml(qa.answer)}</td>
+            <td class="py-2">
+                <button data-id="${qa._id}" class="deleteQA text-red-600">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+    window.debug('qa:list:done', { count: list.length });
+    tbody.querySelectorAll('.deleteQA').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-id');
+            window.debug('qa:delete:start', { id });
+            await fetch(`${window.API_BASE}/api/qa/${id}`, { method: 'DELETE' });
+            await loadQAs();
+            window.debug('qa:delete:done', { id });
+        });
+    });
+}
+
+function escapeHtml(str) {
+    return str.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
+document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('fileInput');
+    if (!input.files[0]) return;
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    const msg = document.getElementById('uploadMsg');
+    msg.textContent = 'Uploading…';
+    try {
+        window.debug('upload:start', { name: input.files[0].name, size: input.files[0].size });
+        const res = await fetch(`${window.API_BASE}/api/upload`, { method: 'POST', body: fd });
+        if (!res.ok) throw new Error('Upload failed');
+        await res.json();
+        msg.textContent = 'Uploaded successfully';
+        input.value = '';
+        await fetchFiles();
+        window.debug('upload:done');
+    } catch (err) {
+        msg.textContent = 'Error: ' + err.message;
+        window.debug('upload:error', { message: err && err.message });
+    }
+});
+
+document.getElementById('saveQA').addEventListener('click', async () => {
+    const file = currentFile;
+    const textPiece = document.getElementById('selectedText').value.trim();
+    const question = document.getElementById('question').value.trim();
+    const answer = document.getElementById('answer').value.trim();
+    const msg = document.getElementById('qaMsg');
+    if (!file) return (msg.textContent = 'Select a file first');
+    if (!textPiece || !question || !answer) return (msg.textContent = 'Fill all fields');
+    msg.textContent = 'Saving…';
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+        msg.textContent = 'Please login first';
+        return;
+    }
+    const res = await fetch(`${window.API_BASE}/api/qa`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ fileId: file._id, textPiece, question, answer }),
+    });
+    if (!res.ok) {
+        msg.textContent = 'Failed to save';
+        window.debug('qa:save:error');
+        return;
+    }
+    msg.textContent = 'Saved';
+    document.getElementById('question').value = '';
+    document.getElementById('answer').value = '';
+    await loadQAs();
+    window.debug('qa:save:done');
+});
+
+// Init
+window.debug('app:init');
+
+// All Q&A listing, sorting, filtering
+let allQAs = [];
+let allFiles = [];
+
+async function fetchAllQAs() {
+    window.debug('qaAll:list:start');
+    const resQ = await fetch(`${window.API_BASE}/api/qa`);
+    allQAs = await resQ.json();
+    const resF = await fetch(`${window.API_BASE}/api/files`);
+    allFiles = await resF.json();
+    populateFileFilter();
+    populateUserFilter();
+    renderAllQAs();
+    window.debug('qaAll:list:done', { count: allQAs.length });
+}
+
+function populateFileFilter() {
+    const sel = document.getElementById('qaFileFilter');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All files</option>';
+    allFiles.forEach((f) => {
+        const opt = document.createElement('option');
+        opt.value = f._id;
+        opt.textContent = f.filename;
+        if (cur && cur === f._id) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+function populateUserFilter() {
+    const sel = document.getElementById('qaUserFilter');
+    const cur = sel.value;
+    // Get unique usernames from allQAs
+    const usernames = new Set();
+    allQAs.forEach((qa) => {
+        const username = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
+        if (username) usernames.add(username);
+    });
+    const sortedUsers = Array.from(usernames).sort();
+    sel.innerHTML = '<option value="">All users</option>';
+    sortedUsers.forEach((u) => {
+        const opt = document.createElement('option');
+        opt.value = u;
+        opt.textContent = u;
+        if (cur && cur === u) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+function renderAllQAs() {
+    const tbody = document.getElementById('qaAllTable');
+    const filterFileId = document.getElementById('qaFileFilter').value;
+    const filterUsername = document.getElementById('qaUserFilter').value;
+    const sortMode = document.getElementById('qaSort').value;
+    let items = allQAs.slice();
+    if (filterFileId) items = items.filter((q) => (q.fileId && (q.fileId._id || q.fileId) === filterFileId));
+    if (filterUsername) items = items.filter((q) => {
+        const username = q.createdBy && q.createdBy.username ? q.createdBy.username : '';
+        return username === filterUsername;
+    });
+    // sort
+    items.sort((a, b) => {
+        if (sortMode === 'date_asc') return new Date(a.createdAt) - new Date(b.createdAt);
+        if (sortMode === 'date_desc') return new Date(b.createdAt) - new Date(a.createdAt);
+        const fa = (a.fileId && (a.fileId.filename || a.fileId)) || '';
+        const fb = (b.fileId && (b.fileId.filename || b.fileId)) || '';
+        if (sortMode === 'file_asc') return String(fa).localeCompare(String(fb));
+        if (sortMode === 'file_desc') return String(fb).localeCompare(String(fa));
+        return 0;
+    });
+    tbody.innerHTML = '';
+    items.forEach((qa) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b align-top';
+        const fileName = qa.fileId && qa.fileId.filename ? qa.fileId.filename : '-';
+        const snippet = qa.textPiece.length > 100 ? qa.textPiece.slice(0, 100) + '…' : qa.textPiece;
+        const added = qa.createdAt ? new Date(qa.createdAt).toLocaleString() : '';
+        const creator = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
+        tr.innerHTML = `
+            <td class="py-2 pr-4">${escapeHtml(fileName)}${creator ? ' · ' + escapeHtml(creator) : ''}</td>
+            <td class="py-2 pr-4">${escapeHtml(snippet)}</td>
+            <td class="py-2 pr-4">${escapeHtml(qa.question)}</td>
+            <td class="py-2 pr-4">${escapeHtml(qa.answer)}</td>
+            <td class="py-2 pr-4">${escapeHtml(added)}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+    // files count (filtered): number of distinct files represented by items
+    const distinct = new Set(items.map((q) => (q.fileId && (q.fileId._id || q.fileId)))).size;
+    document.getElementById('qaFilesCount').textContent = String(distinct);
+}
+
+document.addEventListener('change', (e) => {
+    if (e.target && e.target.id === 'qaFileFilter') {
+        renderAllQAs();
+    }
+    if (e.target && e.target.id === 'qaUserFilter') {
+        renderAllQAs();
+    }
+    if (e.target && e.target.id === 'qaSort') {
+        renderAllQAs();
+    }
+});
+
+// Download all Q&A pairs as JSON
+async function downloadQAsAsJSON() {
+    window.debug('qa:download:start');
+    try {
+        const res = await fetch(`${window.API_BASE}/api/qa`);
+        if (!res.ok) throw new Error('Failed to fetch Q&A pairs');
+        const data = await res.json();
+        
+        // Format data with file and creator info
+        const formatted = data.map((qa) => ({
+            id: qa._id,
+            fileId: qa.fileId?._id || qa.fileId,
+            fileName: qa.fileId?.filename || 'Unknown',
+            textPiece: qa.textPiece,
+            question: qa.question,
+            answer: qa.answer,
+            createdBy: qa.createdBy?.username || 'Unknown',
+            createdAt: qa.createdAt,
+        }));
+        
+        const jsonStr = JSON.stringify(formatted, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const timestamp = new Date().toISOString().split('T')[0];
+        a.href = url;
+        a.download = `qa-pairs-${timestamp}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        window.debug('qa:download:done', { count: formatted.length });
+    } catch (err) {
+        window.debug('qa:download:error', { message: err.message });
+        alert('Failed to download Q&A pairs: ' + err.message);
+    }
+}
+
+document.getElementById('downloadJsonBtn').addEventListener('click', downloadQAsAsJSON);
+
+// Auth UI and logic
+function updateAuthUI() {
+    const token = localStorage.getItem('auth_token');
+    const user = localStorage.getItem('auth_user');
+    const loginScreen = document.getElementById('loginScreen');
+    const mainContent = document.getElementById('mainContent');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const status = document.getElementById('authStatus');
+    if (token && user) {
+        const u = JSON.parse(user);
+        status.textContent = `Signed in as ${u.username}`;
+        loginScreen.classList.add('hidden');
+        mainContent.classList.remove('hidden');
+        logoutBtn.classList.remove('hidden');
+        // Load data when logged in
+        fetchFiles();
+        fetchAllQAs();
+    } else {
+        status.textContent = 'Not signed in';
+        loginScreen.classList.remove('hidden');
+        mainContent.classList.add('hidden');
+        logoutBtn.classList.add('hidden');
+    }
+}
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+    const username = document.getElementById('loginUsername').value.trim();
+    const password = document.getElementById('loginPassword').value.trim();
+    const msg = document.getElementById('loginMsg');
+    if (!username || !password) {
+        msg.textContent = 'Please enter username and password';
+        return;
+    }
+    msg.textContent = 'Signing in…';
+    try {
+        const res = await fetch(`${window.API_BASE}/api/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+        if (!res.ok) throw new Error('Invalid credentials');
+        const data = await res.json();
+        localStorage.setItem('auth_token', data.token);
+        localStorage.setItem('auth_user', JSON.stringify(data.user));
+        msg.textContent = 'Signed in';
+        updateAuthUI();
+    } catch (e) {
+        msg.textContent = 'Login failed: ' + e.message;
+    }
+});
+
+// Allow Enter key to submit login
+document.getElementById('loginPassword').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        document.getElementById('loginBtn').click();
+    }
+});
+
+document.getElementById('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_user');
+    updateAuthUI();
+});
+
+updateAuthUI();
+</script>
+
