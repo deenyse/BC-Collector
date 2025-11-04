@@ -6,57 +6,56 @@ const cors = require('cors');
 const multer = require('multer');
 require('dotenv').config();
 const https = require('https');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { exec } = require('child_process');
 
 // Environment
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/bc_collectors';
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
+const DEBUG = (process.env.DEBUG || '').toLowerCase() === 'true';
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-}
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 // Multer setup
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadsDir);
-    },
-    filename: function (req, file, cb) {
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
         const timestamp = Date.now();
-        const safeOriginal = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const safeOriginal = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 150);
         cb(null, `${timestamp}-${safeOriginal}`);
     },
 });
 const upload = multer({
     storage,
-    fileFilter: function (req, file, cb) {
-        const allowed = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    fileFilter: (req, file, cb) => {
+        const allowed = [
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ];
         if (allowed.includes(file.mimetype)) return cb(null, true);
         cb(new Error('Only PDF and DOCX files are allowed'));
     },
-    limits: { fileSize: 50 * 1024 * 1024 },
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
 });
 
 // Models
 const File = require('./models/File');
 const QAPair = require('./models/QAPair');
 const User = require('./models/User');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 
-// App
+// Express app
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 // Debug helper
-const DEBUG = (process.env.DEBUG || '').toLowerCase() === 'true';
 function debug(event, data) {
     if (!DEBUG) return;
-    try {
-        console.log(`[DEBUG] ${event}`, data || '');
-    } catch (_) {}
+    try { console.log(`[DEBUG] ${event}`, data || ''); } catch (_) {}
 }
 
 // Simple request logger (debug-only)
@@ -67,25 +66,21 @@ app.use((req, res, next) => {
 
 // Static: uploads and frontend
 app.use('/uploads', express.static(uploadsDir));
-const frontendDir = path.join(__dirname, '..', 'BC-Collector', 'frontend', 'dist');
+const frontendDir = path.join(__dirname, '..', 'BC-Collector', 'frontend');
 app.use('/', express.static(frontendDir));
-app.get('*', (req, res) => {
-    res.sendFile(path.join(frontendDir, 'index.html'));
-});
-// Simple CDN proxy with in-memory cache to avoid CORB for pdf.js
+
+// Simple CDN proxy with in-memory cache for pdf.js
 const cdnCache = {};
 function fetchCdnOnce(url, contentType) {
     return new Promise((resolve, reject) => {
         if (cdnCache[url]) return resolve(cdnCache[url]);
         https.get(url, (resp) => {
-            if (resp.statusCode !== 200) {
-                return reject(new Error(`CDN status ${resp.statusCode}`));
-            }
+            if (resp.statusCode !== 200) return reject(new Error(`CDN status ${resp.statusCode}`));
             const chunks = [];
-            resp.on('data', (d) => chunks.push(d));
+            resp.on('data', d => chunks.push(d));
             resp.on('end', () => {
                 const buf = Buffer.concat(chunks);
-                cdnCache[url] = { buf, contentType };
+                cdnCache[url] = { buf, contentType, cachedAt: Date.now() };
                 resolve(cdnCache[url]);
             });
         }).on('error', reject);
@@ -121,13 +116,13 @@ app.get('/vendor/pdf.worker.min.js', async (req, res) => {
 // Mongo connection
 mongoose
     .connect(MONGO_URI)
-    .then(() => console.log('MongoDB connected'))
-    .catch((err) => {
-        console.error('MongoDB connection error:', err);
-    });
+    .then(() => {
+        console.log('MongoDB connected');
+        ensureSeedUsers().catch(console.error);
+    })
+    .catch(err => console.error('MongoDB connection error:', err));
 
-// Routes
-// Seed users if none
+// Seed users if none exist
 async function ensureSeedUsers() {
     const count = await User.countDocuments();
     if (count > 0) return;
@@ -141,24 +136,21 @@ async function ensureSeedUsers() {
     }
     console.log('Seeded users: user1/user1, user2/user2');
 }
-ensureSeedUsers().catch(() => {});
 
-// Auth helpers
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
+// Auth middleware
 function authMiddleware(req, res, next) {
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     try {
-        const payload = jwt.verify(token, JWT_SECRET);
-        req.user = payload; // { id, username }
+        req.user = jwt.verify(token, JWT_SECRET);
         next();
-    } catch (e) {
-        return res.status(401).json({ error: 'Invalid token' });
+    } catch {
+        res.status(401).json({ error: 'Invalid token' });
     }
 }
 
-// POST /api/login
+// Routes
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -174,7 +166,7 @@ app.post('/api/login', async (req, res) => {
         res.status(500).json({ error: 'Login failed' });
     }
 });
-// POST /api/upload - upload file and create File document
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -191,7 +183,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
-// GET /api/file/:id - retrieve file metadata
 app.get('/api/file/:id', async (req, res) => {
     try {
         const file = await File.findById(req.params.id);
@@ -204,20 +195,16 @@ app.get('/api/file/:id', async (req, res) => {
     }
 });
 
-// GET /api/files - list files (helper for UI)
 app.get('/api/files', async (req, res) => {
     const files = await File.find().sort({ uploadedAt: -1 });
     debug('files:list', { count: files.length });
     res.json(files);
 });
 
-// POST /api/qa - save Q&A pair
 app.post('/api/qa', authMiddleware, async (req, res) => {
     try {
         const { fileId, textPiece, question, answer } = req.body;
-        if (!fileId || !textPiece || !question || !answer) {
-            return res.status(400).json({ error: 'Missing fields' });
-        }
+        if (!fileId || !textPiece || !question || !answer) return res.status(400).json({ error: 'Missing fields' });
         const exists = await File.exists({ _id: fileId });
         if (!exists) return res.status(404).json({ error: 'File not found' });
         const saved = await QAPair.create({ fileId, textPiece, question, answer, createdBy: req.user.id });
@@ -230,10 +217,11 @@ app.post('/api/qa', authMiddleware, async (req, res) => {
     }
 });
 
-// GET /api/qa/:fileId - list Q&A pairs for file
 app.get('/api/qa/:fileId', async (req, res) => {
     try {
-        const list = await QAPair.find({ fileId: req.params.fileId }).sort({ createdAt: -1 }).populate('createdBy', 'username');
+        const list = await QAPair.find({ fileId: req.params.fileId })
+            .sort({ createdAt: -1 })
+            .populate('createdBy', 'username');
         debug('qa:list', { fileId: req.params.fileId, count: list.length });
         res.json(list);
     } catch (err) {
@@ -242,12 +230,14 @@ app.get('/api/qa/:fileId', async (req, res) => {
     }
 });
 
-// GET /api/qa - list all Q&A pairs (with file info populated)
 app.get('/api/qa', async (req, res) => {
     try {
         const { fileId } = req.query;
         const filter = fileId ? { fileId } : {};
-        const list = await QAPair.find(filter).sort({ createdAt: -1 }).populate('fileId', 'filename').populate('createdBy', 'username');
+        const list = await QAPair.find(filter)
+            .sort({ createdAt: -1 })
+            .populate('fileId', 'filename')
+            .populate('createdBy', 'username');
         debug('qa:listAll', { count: list.length, filtered: !!fileId });
         res.json(list);
     } catch (err) {
@@ -256,7 +246,6 @@ app.get('/api/qa', async (req, res) => {
     }
 });
 
-// DELETE /api/qa/:id - optional delete
 app.delete('/api/qa/:id', async (req, res) => {
     try {
         const deleted = await QAPair.findByIdAndDelete(req.params.id);
@@ -269,15 +258,40 @@ app.delete('/api/qa/:id', async (req, res) => {
     }
 });
 
-// Fallback to index.html
+// Debug-tree route (cross-platform)
+app.get('/debug-tree', (req, res) => {
+    const isWindows = process.platform === 'win32';
+    const root = process.env.RENDER ? '/opt/render/project' : process.cwd();
+    const cmd = isWindows ? `dir /s "${root}"` : `tree -L 3 "${root}"`;
+
+    exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+        res.type('text/plain');
+        res.send(
+`🖥️  SERVER STARTED: ${new Date().toLocaleString()}
+🌍  process.cwd() = ${process.cwd()}
+${isWindows ? '💻 Windows' : '💻 Unix/Linux'}
+
+📂  EXECUTING: ${cmd}
+${'-'.repeat(50)}
+${err ? `ERROR: ${err.message}\nSTDERR: ${stderr}` : stdout}
+${'-'.repeat(50)}
+📍  frontendDir = ${frontendDir}
+${fs.existsSync(path.join(frontendDir, 'index.html')) ? '✅ index.html FOUND' : '❌ index.html NOT FOUND'}
+`
+        );
+    });
+});
+
+
+// Fallback to frontend index.html
 app.get('*', (req, res) => {
     const indexPath = path.join(frontendDir, 'index.html');
     if (fs.existsSync(indexPath)) return res.sendFile(indexPath);
     res.status(404).send('Not Found');
 });
 
+
+// Start server
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
-
-
