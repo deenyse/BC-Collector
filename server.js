@@ -66,7 +66,7 @@ app.use((req, res, next) => {
 
 // Static: uploads and frontend
 app.use('/uploads', express.static(uploadsDir));
-const frontendDir = path.join(__dirname, '..', '..', 'src', 'frontend', 'dist');
+const frontendDir = path.join(__dirname, 'frontend');
 app.use('/', express.static(frontendDir));
 
 // Simple CDN proxy with in-memory cache for pdf.js
