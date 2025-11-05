@@ -7,58 +7,34 @@
     <!-- Tailwind via CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .qa-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        .qa-table th,
-        .qa-table td {
-            padding: 1rem;
-            text-align: left;
-            border-bottom: 1px solid #e5e7eb;
-            vertical-align: top;
-        }
-        .qa-table th {
-            background-color: #f9fafb;
-            font-weight: 600;
-        }
-        .qa-table td p {
-            margin: 0.5rem 0;
-            line-height: 1.6;
-        }
-        .qa-table td p:first-child {
-            margin-top: 0;
-        }
-        .qa-table td p:last-child {
-            margin-bottom: 0;
-        }
     </style>
     <script>
         window.API_BASE = '';
+        
+        // simple debug helper
+        window.debug = function(event, data) {
+            try { if (window.onDebug) window.onDebug(event, data); } catch (e) {}
+            try { console.debug('[DEBUG]', event, data || ''); } catch (e) {}
+        }
         
         function escapeHtml(str) {
             if (!str) return '';
             return str.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
         }
         
-        function formatParagraphs(text) {
-            if (!text) return '';
-            // Split by double newlines or single newlines followed by content
-            const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
-            if (paragraphs.length === 0) return '<p>' + escapeHtml(text) + '</p>';
-            return paragraphs.map(p => '<p>' + escapeHtml(p.trim()) + '</p>').join('');
-        }
-        
-        async function loadQAPreview() {
-            const tbody = document.getElementById('qaTableBody');
+        // All Q&A listing, sorting, filtering
+        let allQAs = [];
+        let allFiles = [];
+
+        async function fetchAllQAs() {
             const loadingMsg = document.getElementById('loadingMsg');
             const errorMsg = document.getElementById('errorMsg');
             
-            tbody.innerHTML = '';
             loadingMsg.classList.remove('hidden');
             errorMsg.classList.add('hidden');
             
             try {
+                window.debug('qaAll:list:start');
                 const token = localStorage.getItem('auth_token');
                 const headers = {};
                 
@@ -66,49 +42,152 @@
                     headers['Authorization'] = `Bearer ${token}`;
                 }
                 
-                const res = await fetch(`${window.API_BASE}/api/qa`, {
-                    headers: headers
-                });
+                const resQ = await fetch(`${window.API_BASE}/api/qa`, { headers });
+                if (!resQ.ok) throw new Error('Failed to fetch Q&A pairs');
+                allQAs = await resQ.json();
                 
-                if (!res.ok) {
-                    if (res.status === 401) {
-                        throw new Error('Unauthorized. Please login.');
-                    }
-                    throw new Error('Failed to load Q&A pairs');
-                }
+                const resF = await fetch(`${window.API_BASE}/api/files`);
+                if (!resF.ok) throw new Error('Failed to fetch files');
+                allFiles = await resF.json();
                 
-                const qaList = await res.json();
-                
-                if (qaList.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-gray-500 py-8">No Q&A pairs found</td></tr>';
-                    loadingMsg.classList.add('hidden');
-                    return;
-                }
-                
-                qaList.forEach((qa, index) => {
-                    const tr = document.createElement('tr');
-                    tr.className = 'hover:bg-gray-50';
-                    
-                    const snippetHtml = formatParagraphs(qa.textPiece);
-                    const questionHtml = formatParagraphs(qa.question);
-                    const answerHtml = formatParagraphs(qa.answer);
-                    
-                    tr.innerHTML = `
-                        <td class="w-1/3">${snippetHtml}</td>
-                        <td class="w-1/3">${questionHtml}</td>
-                        <td class="w-1/3">${answerHtml}</td>
-                    `;
-                    
-                    tbody.appendChild(tr);
-                });
-                
+                populateFileFilter();
+                populateUserFilter();
+                renderAllQAs();
                 loadingMsg.classList.add('hidden');
-                document.getElementById('qaCount').textContent = qaList.length;
+                document.getElementById('qaCount').textContent = allQAs.length;
+                window.debug('qaAll:list:done', { count: allQAs.length });
             } catch (err) {
                 loadingMsg.classList.add('hidden');
                 errorMsg.textContent = 'Error: ' + err.message;
                 errorMsg.classList.remove('hidden');
                 console.error('Error loading Q&A:', err);
+                window.debug('qaAll:list:error', { message: err.message });
+            }
+        }
+
+        function populateFileFilter() {
+            const sel = document.getElementById('qaFileFilter');
+            const cur = sel.value;
+            sel.innerHTML = '<option value="">All files</option>';
+            allFiles.forEach((f) => {
+                const opt = document.createElement('option');
+                opt.value = f._id;
+                opt.textContent = f.filename;
+                if (cur && cur === f._id) opt.selected = true;
+                sel.appendChild(opt);
+            });
+        }
+
+        function populateUserFilter() {
+            const sel = document.getElementById('qaUserFilter');
+            const cur = sel.value;
+            // Get unique usernames from allQAs
+            const usernames = new Set();
+            allQAs.forEach((qa) => {
+                const username = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
+                if (username) usernames.add(username);
+            });
+            const sortedUsers = Array.from(usernames).sort();
+            sel.innerHTML = '<option value="">All users</option>';
+            sortedUsers.forEach((u) => {
+                const opt = document.createElement('option');
+                opt.value = u;
+                opt.textContent = u;
+                if (cur && cur === u) opt.selected = true;
+                sel.appendChild(opt);
+            });
+        }
+
+        function renderAllQAs() {
+            const tbody = document.getElementById('qaAllTable');
+            const filterFileId = document.getElementById('qaFileFilter').value;
+            const filterUsername = document.getElementById('qaUserFilter').value;
+            const sortMode = document.getElementById('qaSort').value;
+            let items = allQAs.slice();
+            if (filterFileId) items = items.filter((q) => (q.fileId && (q.fileId._id || q.fileId) === filterFileId));
+            if (filterUsername) items = items.filter((q) => {
+                const username = q.createdBy && q.createdBy.username ? q.createdBy.username : '';
+                return username === filterUsername;
+            });
+            // sort
+            items.sort((a, b) => {
+                if (sortMode === 'date_asc') return new Date(a.createdAt) - new Date(b.createdAt);
+                if (sortMode === 'date_desc') return new Date(b.createdAt) - new Date(a.createdAt);
+                const fa = (a.fileId && (a.fileId.filename || a.fileId)) || '';
+                const fb = (b.fileId && (b.fileId.filename || b.fileId)) || '';
+                if (sortMode === 'file_asc') return String(fa).localeCompare(String(fb));
+                if (sortMode === 'file_desc') return String(fb).localeCompare(String(fa));
+                return 0;
+            });
+            tbody.innerHTML = '';
+            items.forEach((qa) => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-b align-top';
+                const fileName = qa.fileId && qa.fileId.filename ? qa.fileId.filename : '-';
+                const snippet = qa.textPiece.length > 100 ? qa.textPiece.slice(0, 100) + '…' : qa.textPiece;
+                const added = qa.createdAt ? new Date(qa.createdAt).toLocaleString() : '';
+                const creator = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
+                tr.innerHTML = `
+                    <td class="py-2 pr-4">${escapeHtml(fileName)}${creator ? ' · ' + escapeHtml(creator) : ''}</td>
+                    <td class="py-2 pr-4">${escapeHtml(snippet)}</td>
+                    <td class="py-2 pr-4">${escapeHtml(qa.question)}</td>
+                    <td class="py-2 pr-4">${escapeHtml(qa.answer)}</td>
+                    <td class="py-2 pr-4">${escapeHtml(added)}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            // files count (filtered): number of distinct files represented by items
+            const distinct = new Set(items.map((q) => (q.fileId && (q.fileId._id || q.fileId)))).size;
+            document.getElementById('qaFilesCount').textContent = String(distinct);
+        }
+
+        document.addEventListener('change', (e) => {
+            if (e.target && e.target.id === 'qaFileFilter') {
+                renderAllQAs();
+            }
+            if (e.target && e.target.id === 'qaUserFilter') {
+                renderAllQAs();
+            }
+            if (e.target && e.target.id === 'qaSort') {
+                renderAllQAs();
+            }
+        });
+
+        // Download all Q&A pairs as JSON
+        async function downloadQAsAsJSON() {
+            window.debug('qa:download:start');
+            try {
+                const res = await fetch(`${window.API_BASE}/api/qa`);
+                if (!res.ok) throw new Error('Failed to fetch Q&A pairs');
+                const data = await res.json();
+                
+                // Format data with file and creator info
+                const formatted = data.map((qa) => ({
+                    id: qa._id,
+                    fileId: qa.fileId?._id || qa.fileId,
+                    fileName: qa.fileId?.filename || 'Unknown',
+                    textPiece: qa.textPiece,
+                    question: qa.question,
+                    answer: qa.answer,
+                    createdBy: qa.createdBy?.username || 'Unknown',
+                    createdAt: qa.createdAt,
+                }));
+                
+                const jsonStr = JSON.stringify(formatted, null, 2);
+                const blob = new Blob([jsonStr], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const timestamp = new Date().toISOString().split('T')[0];
+                a.href = url;
+                a.download = `qa-pairs-${timestamp}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                window.debug('qa:download:done', { count: formatted.length });
+            } catch (err) {
+                window.debug('qa:download:error', { message: err.message });
+                alert('Failed to download Q&A pairs: ' + err.message);
             }
         }
         
@@ -141,8 +220,10 @@
                 window.location.href = '/';
             });
             
+            document.getElementById('downloadJsonBtn').addEventListener('click', downloadQAsAsJSON);
+            
             checkAuth();
-            loadQAPreview();
+            fetchAllQAs();
         }
         
         if (document.readyState === 'loading') {
@@ -177,7 +258,7 @@
                     <span class="text-sm text-gray-600">Total Q&A pairs: </span>
                     <span id="qaCount" class="font-semibold">0</span>
                 </div>
-                <button onclick="loadQAPreview()" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">Refresh</button>
+                <button onclick="fetchAllQAs()" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">Refresh</button>
             </div>
         </div>
         
@@ -189,18 +270,48 @@
             Loading Q&A pairs...
         </div>
         
-        <!-- Q&A Table -->
+        <!-- All Q&A -->
         <div class="bg-white p-4 rounded shadow">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-2 mb-2">
+                <h3 class="font-medium">All Q&A</h3>
+                <div class="flex flex-wrap gap-2 items-end">
+                    <button id="downloadJsonBtn" class="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700">Download JSON</button>
+                    <div>
+                        <label for="qaFileFilter" class="text-sm text-gray-700">Filter by file</label>
+                        <select id="qaFileFilter" class="border rounded p-1 ml-2">
+                            <option value="">All files</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="qaUserFilter" class="text-sm text-gray-700">Filter by user</label>
+                        <select id="qaUserFilter" class="border rounded p-1 ml-2">
+                            <option value="">All users</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="qaSort" class="text-sm text-gray-700">Sort</label>
+                        <select id="qaSort" class="border rounded p-1 ml-2">
+                            <option value="date_desc">Date added (newest)</option>
+                            <option value="date_asc">Date added (oldest)</option>
+                            <option value="file_asc">File (A→Z)</option>
+                            <option value="file_desc">File (Z→A)</option>
+                        </select>
+                    </div>
+                    <div class="text-sm text-gray-600">Files: <span id="qaFilesCount">0</span></div>
+                </div>
+            </div>
             <div class="overflow-x-auto">
-                <table class="qa-table">
+                <table class="min-w-full text-sm">
                     <thead>
-                        <tr>
-                            <th class="w-1/3">Snippet</th>
-                            <th class="w-1/3">Question</th>
-                            <th class="w-1/3">Answer</th>
+                        <tr class="text-left border-b">
+                            <th class="py-2 pr-4">File</th>
+                            <th class="py-2 pr-4">Snippet</th>
+                            <th class="py-2 pr-4">Question</th>
+                            <th class="py-2 pr-4">Answer</th>
+                            <th class="py-2 pr-4">Added</th>
                         </tr>
                     </thead>
-                    <tbody id="qaTableBody"></tbody>
+                    <tbody id="qaAllTable"></tbody>
                 </table>
             </div>
         </div>

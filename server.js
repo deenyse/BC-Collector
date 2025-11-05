@@ -175,6 +175,25 @@ app.get('/api/files', async (req, res) => {
     res.json(files);
 });
 
+app.delete('/api/file/:id', async (req, res) => {
+    try {
+        const file = await File.findById(req.params.id);
+        if (!file) return res.status(404).json({ error: 'File not found' });
+        
+        // Delete all Q&A pairs associated with this file
+        const qaResult = await QAPair.deleteMany({ fileId: req.params.id });
+        debug('file:delete:qa', { fileId: req.params.id, deletedCount: qaResult.deletedCount });
+        
+        // Delete the file
+        await File.findByIdAndDelete(req.params.id);
+        debug('file:delete', { id: req.params.id });
+        res.json({ ok: true, deletedQAs: qaResult.deletedCount });
+    } catch (err) {
+        debug('file:delete:error', { message: err.message });
+        res.status(400).json({ error: 'Invalid id' });
+    }
+});
+
 app.post('/api/qa', authMiddleware, async (req, res) => {
     try {
         const { fileId, textPiece, question, answer } = req.body;

@@ -191,51 +191,6 @@
                         </table>
                     </div>
                 </div>
-
-                <div class="mt-4 bg-white p-4 rounded shadow">
-                    <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-2 mb-2">
-                        <h3 class="font-medium">All Q&A</h3>
-                        <div class="flex flex-wrap gap-2 items-end">
-                            <button id="downloadJsonBtn" class="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700">Download JSON</button>
-                            <div>
-                                <label for="qaFileFilter" class="text-sm text-gray-700">Filter by file</label>
-                                <select id="qaFileFilter" class="border rounded p-1 ml-2">
-                                    <option value="">All files</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label for="qaUserFilter" class="text-sm text-gray-700">Filter by user</label>
-                                <select id="qaUserFilter" class="border rounded p-1 ml-2">
-                                    <option value="">All users</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label for="qaSort" class="text-sm text-gray-700">Sort</label>
-                                <select id="qaSort" class="border rounded p-1 ml-2">
-                                    <option value="date_desc">Date added (newest)</option>
-                                    <option value="date_asc">Date added (oldest)</option>
-                                    <option value="file_asc">File (A→Z)</option>
-                                    <option value="file_desc">File (Z→A)</option>
-                                </select>
-                            </div>
-                            <div class="text-sm text-gray-600">Files: <span id="qaFilesCount">0</span></div>
-                        </div>
-                    </div>
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full text-sm">
-                            <thead>
-                                <tr class="text-left border-b">
-                                    <th class="py-2 pr-4">File</th>
-                                    <th class="py-2 pr-4">Snippet</th>
-                                    <th class="py-2 pr-4">Question</th>
-                                    <th class="py-2 pr-4">Answer</th>
-                                    <th class="py-2 pr-4">Added</th>
-                                </tr>
-                            </thead>
-                            <tbody id="qaAllTable"></tbody>
-                        </table>
-                    </div>
-                </div>
             </div>
         </div>
     </div>
@@ -267,6 +222,7 @@ async function fetchFiles() {
             <td class="py-2 pr-4 space-x-2">
                 <button class="selectFile px-2 py-1 border rounded hover:bg-gray-100" data-id="${f._id}">Select</button>
                 ${downloadLink}
+                <button class="deleteFile px-2 py-1 border rounded hover:bg-red-100 text-red-600" data-id="${f._id}" data-filename="${escapeHtml(f.filename)}">Remove</button>
             </td>
         `;
         tbody.appendChild(tr);
@@ -276,6 +232,28 @@ async function fetchFiles() {
             const id = btn.getAttribute('data-id');
             const f = files.find((x) => x._id === id);
             if (f) selectFile(f);
+        });
+    });
+    tbody.querySelectorAll('.deleteFile').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            const id = btn.getAttribute('data-id');
+            const filename = btn.getAttribute('data-filename');
+            if (!confirm(`Are you sure you want to remove "${filename}"? This action cannot be undone.`)) {
+                return;
+            }
+            try {
+                window.debug('file:delete:start', { id });
+                const res = await fetch(`${window.API_BASE}/api/file/${id}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error || 'Failed to delete file');
+                }
+                await fetchFiles();
+                window.debug('file:delete:done', { id });
+            } catch (err) {
+                alert('Error deleting file: ' + err.message);
+                window.debug('file:delete:error', { message: err.message });
+            }
         });
     });
     window.debug('files:list:done', { count: files.length });
@@ -497,150 +475,6 @@ document.getElementById('saveQA').addEventListener('click', async () => {
 // Init
 window.debug('app:init');
 
-// All Q&A listing, sorting, filtering
-let allQAs = [];
-let allFiles = [];
-
-async function fetchAllQAs() {
-    window.debug('qaAll:list:start');
-    const resQ = await fetch(`${window.API_BASE}/api/qa`);
-    allQAs = await resQ.json();
-    const resF = await fetch(`${window.API_BASE}/api/files`);
-    allFiles = await resF.json();
-    populateFileFilter();
-    populateUserFilter();
-    renderAllQAs();
-    window.debug('qaAll:list:done', { count: allQAs.length });
-}
-
-function populateFileFilter() {
-    const sel = document.getElementById('qaFileFilter');
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">All files</option>';
-    allFiles.forEach((f) => {
-        const opt = document.createElement('option');
-        opt.value = f._id;
-        opt.textContent = f.filename;
-        if (cur && cur === f._id) opt.selected = true;
-        sel.appendChild(opt);
-    });
-}
-
-function populateUserFilter() {
-    const sel = document.getElementById('qaUserFilter');
-    const cur = sel.value;
-    // Get unique usernames from allQAs
-    const usernames = new Set();
-    allQAs.forEach((qa) => {
-        const username = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
-        if (username) usernames.add(username);
-    });
-    const sortedUsers = Array.from(usernames).sort();
-    sel.innerHTML = '<option value="">All users</option>';
-    sortedUsers.forEach((u) => {
-        const opt = document.createElement('option');
-        opt.value = u;
-        opt.textContent = u;
-        if (cur && cur === u) opt.selected = true;
-        sel.appendChild(opt);
-    });
-}
-
-function renderAllQAs() {
-    const tbody = document.getElementById('qaAllTable');
-    const filterFileId = document.getElementById('qaFileFilter').value;
-    const filterUsername = document.getElementById('qaUserFilter').value;
-    const sortMode = document.getElementById('qaSort').value;
-    let items = allQAs.slice();
-    if (filterFileId) items = items.filter((q) => (q.fileId && (q.fileId._id || q.fileId) === filterFileId));
-    if (filterUsername) items = items.filter((q) => {
-        const username = q.createdBy && q.createdBy.username ? q.createdBy.username : '';
-        return username === filterUsername;
-    });
-    // sort
-    items.sort((a, b) => {
-        if (sortMode === 'date_asc') return new Date(a.createdAt) - new Date(b.createdAt);
-        if (sortMode === 'date_desc') return new Date(b.createdAt) - new Date(a.createdAt);
-        const fa = (a.fileId && (a.fileId.filename || a.fileId)) || '';
-        const fb = (b.fileId && (b.fileId.filename || b.fileId)) || '';
-        if (sortMode === 'file_asc') return String(fa).localeCompare(String(fb));
-        if (sortMode === 'file_desc') return String(fb).localeCompare(String(fa));
-        return 0;
-    });
-    tbody.innerHTML = '';
-    items.forEach((qa) => {
-        const tr = document.createElement('tr');
-        tr.className = 'border-b align-top';
-        const fileName = qa.fileId && qa.fileId.filename ? qa.fileId.filename : '-';
-        const snippet = qa.textPiece.length > 100 ? qa.textPiece.slice(0, 100) + '…' : qa.textPiece;
-        const added = qa.createdAt ? new Date(qa.createdAt).toLocaleString() : '';
-        const creator = qa.createdBy && qa.createdBy.username ? qa.createdBy.username : '';
-        tr.innerHTML = `
-            <td class="py-2 pr-4">${escapeHtml(fileName)}${creator ? ' · ' + escapeHtml(creator) : ''}</td>
-            <td class="py-2 pr-4">${escapeHtml(snippet)}</td>
-            <td class="py-2 pr-4">${escapeHtml(qa.question)}</td>
-            <td class="py-2 pr-4">${escapeHtml(qa.answer)}</td>
-            <td class="py-2 pr-4">${escapeHtml(added)}</td>
-        `;
-        tbody.appendChild(tr);
-    });
-    // files count (filtered): number of distinct files represented by items
-    const distinct = new Set(items.map((q) => (q.fileId && (q.fileId._id || q.fileId)))).size;
-    document.getElementById('qaFilesCount').textContent = String(distinct);
-}
-
-document.addEventListener('change', (e) => {
-    if (e.target && e.target.id === 'qaFileFilter') {
-        renderAllQAs();
-    }
-    if (e.target && e.target.id === 'qaUserFilter') {
-        renderAllQAs();
-    }
-    if (e.target && e.target.id === 'qaSort') {
-        renderAllQAs();
-    }
-});
-
-// Download all Q&A pairs as JSON
-async function downloadQAsAsJSON() {
-    window.debug('qa:download:start');
-    try {
-        const res = await fetch(`${window.API_BASE}/api/qa`);
-        if (!res.ok) throw new Error('Failed to fetch Q&A pairs');
-        const data = await res.json();
-        
-        // Format data with file and creator info
-        const formatted = data.map((qa) => ({
-            id: qa._id,
-            fileId: qa.fileId?._id || qa.fileId,
-            fileName: qa.fileId?.filename || 'Unknown',
-            textPiece: qa.textPiece,
-            question: qa.question,
-            answer: qa.answer,
-            createdBy: qa.createdBy?.username || 'Unknown',
-            createdAt: qa.createdAt,
-        }));
-        
-        const jsonStr = JSON.stringify(formatted, null, 2);
-        const blob = new Blob([jsonStr], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const timestamp = new Date().toISOString().split('T')[0];
-        a.href = url;
-        a.download = `qa-pairs-${timestamp}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        window.debug('qa:download:done', { count: formatted.length });
-    } catch (err) {
-        window.debug('qa:download:error', { message: err.message });
-        alert('Failed to download Q&A pairs: ' + err.message);
-    }
-}
-
-document.getElementById('downloadJsonBtn').addEventListener('click', downloadQAsAsJSON);
-
 // Auth UI and logic
 function updateAuthUI() {
     const token = localStorage.getItem('auth_token');
@@ -657,7 +491,6 @@ function updateAuthUI() {
         logoutBtn.classList.remove('hidden');
         // Load data when logged in
         fetchFiles();
-        fetchAllQAs();
     } else {
         status.textContent = 'Not signed in';
         loginScreen.classList.remove('hidden');
