@@ -3,7 +3,6 @@ const fs = require('fs');
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const multer = require('multer');
 require('dotenv').config();
 const https = require('https');
 const bcrypt = require('bcryptjs');
@@ -15,32 +14,6 @@ const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/bc_collectors';
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 const DEBUG = (process.env.DEBUG || '').toLowerCase() === 'true';
-
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-
-// Multer setup
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadsDir),
-    filename: (req, file, cb) => {
-        const timestamp = Date.now();
-        const safeOriginal = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 150);
-        cb(null, `${timestamp}-${safeOriginal}`);
-    },
-});
-const upload = multer({
-    storage,
-    fileFilter: (req, file, cb) => {
-        const allowed = [
-            'application/pdf',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        ];
-        if (allowed.includes(file.mimetype)) return cb(null, true);
-        cb(new Error('Only PDF and DOCX files are allowed'));
-    },
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
-});
 
 // Models
 const File = require('./models/File');
@@ -64,8 +37,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// Static: uploads and frontend
-app.use('/uploads', express.static(uploadsDir));
+// Static: frontend
 const frontendDir = path.join(__dirname, 'frontend');
 app.use('/', express.static(frontendDir));
 
@@ -167,19 +139,21 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-app.post('/api/upload', upload.single('file'), async (req, res) => {
+app.post('/api/upload', async (req, res) => {
     try {
-        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+        const { filename, fileLink } = req.body;
+        if (!filename) return res.status(400).json({ error: 'Filename is required' });
+        
         const saved = await File.create({
-            filename: req.file.originalname,
-            filepath: `/uploads/${req.file.filename}`,
+            filename: filename,
+            fileLink: fileLink || undefined, // Optional file link
         });
         debug('upload:success', { id: saved._id.toString(), filename: saved.filename });
         res.status(201).json(saved);
     } catch (err) {
         console.error(err);
         debug('upload:error', { message: err.message });
-        res.status(500).json({ error: 'Upload failed' });
+        res.status(500).json({ error: 'Failed to save file' });
     }
 });
 

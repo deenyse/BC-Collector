@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Q&A Preview - BC Collectors</title>
+    <!-- Tailwind via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .qa-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .qa-table th,
+        .qa-table td {
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+            vertical-align: top;
+        }
+        .qa-table th {
+            background-color: #f9fafb;
+            font-weight: 600;
+        }
+        .qa-table td p {
+            margin: 0.5rem 0;
+            line-height: 1.6;
+        }
+        .qa-table td p:first-child {
+            margin-top: 0;
+        }
+        .qa-table td p:last-child {
+            margin-bottom: 0;
+        }
+    </style>
+    <script>
+        window.API_BASE = '';
+        
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+        }
+        
+        function formatParagraphs(text) {
+            if (!text) return '';
+            // Split by double newlines or single newlines followed by content
+            const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim());
+            if (paragraphs.length === 0) return '<p>' + escapeHtml(text) + '</p>';
+            return paragraphs.map(p => '<p>' + escapeHtml(p.trim()) + '</p>').join('');
+        }
+        
+        async function loadQAPreview() {
+            const tbody = document.getElementById('qaTableBody');
+            const loadingMsg = document.getElementById('loadingMsg');
+            const errorMsg = document.getElementById('errorMsg');
+            
+            tbody.innerHTML = '';
+            loadingMsg.classList.remove('hidden');
+            errorMsg.classList.add('hidden');
+            
+            try {
+                const token = localStorage.getItem('auth_token');
+                const headers = {};
+                
+                if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
+                }
+                
+                const res = await fetch(`${window.API_BASE}/api/qa`, {
+                    headers: headers
+                });
+                
+                if (!res.ok) {
+                    if (res.status === 401) {
+                        throw new Error('Unauthorized. Please login.');
+                    }
+                    throw new Error('Failed to load Q&A pairs');
+                }
+                
+                const qaList = await res.json();
+                
+                if (qaList.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-gray-500 py-8">No Q&A pairs found</td></tr>';
+                    loadingMsg.classList.add('hidden');
+                    return;
+                }
+                
+                qaList.forEach((qa, index) => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'hover:bg-gray-50';
+                    
+                    const snippetHtml = formatParagraphs(qa.textPiece);
+                    const questionHtml = formatParagraphs(qa.question);
+                    const answerHtml = formatParagraphs(qa.answer);
+                    
+                    tr.innerHTML = `
+                        <td class="w-1/3">${snippetHtml}</td>
+                        <td class="w-1/3">${questionHtml}</td>
+                        <td class="w-1/3">${answerHtml}</td>
+                    `;
+                    
+                    tbody.appendChild(tr);
+                });
+                
+                loadingMsg.classList.add('hidden');
+                document.getElementById('qaCount').textContent = qaList.length;
+            } catch (err) {
+                loadingMsg.classList.add('hidden');
+                errorMsg.textContent = 'Error: ' + err.message;
+                errorMsg.classList.remove('hidden');
+                console.error('Error loading Q&A:', err);
+            }
+        }
+        
+        function checkAuth() {
+            const token = localStorage.getItem('auth_token');
+            const user = localStorage.getItem('auth_user');
+            
+            if (token && user) {
+                try {
+                    const u = JSON.parse(user);
+                    document.getElementById('userInfo').textContent = `Signed in as ${u.username}`;
+                } catch (e) {
+                    console.error('Error parsing user info:', e);
+                    document.getElementById('userInfo').textContent = 'Not signed in';
+                }
+            } else {
+                document.getElementById('userInfo').textContent = 'Not signed in';
+            }
+        }
+        
+        // Initialize when DOM is ready
+        function initialize() {
+            document.getElementById('logoutBtn').addEventListener('click', () => {
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('auth_user');
+                window.location.href = '/';
+            });
+            
+            document.getElementById('backBtn').addEventListener('click', () => {
+                window.location.href = '/';
+            });
+            
+            checkAuth();
+            loadQAPreview();
+        }
+        
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initialize);
+        } else {
+            // DOM is already loaded
+            initialize();
+        }
+    </script>
+</head>
+<body class="bg-gray-50">
+    <div class="max-w-7xl mx-auto p-4 space-y-4">
+        <!-- Header -->
+        <div class="bg-white p-4 rounded shadow flex items-center justify-between">
+            <div class="flex items-center gap-4">
+                <button id="backBtn" class="px-3 py-1 border rounded hover:bg-gray-100 text-sm">← Back</button>
+                <div>
+                    <h1 class="text-xl font-semibold">Q&A Preview</h1>
+                    <p class="text-sm text-gray-600">View all questions and answers</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2 text-sm">
+                <span id="userInfo">Not signed in</span>
+                <button id="logoutBtn" class="px-2 py-1 border rounded hover:bg-gray-100">Logout</button>
+            </div>
+        </div>
+        
+        <!-- Stats -->
+        <div class="bg-white p-4 rounded shadow">
+            <div class="flex items-center justify-between">
+                <div>
+                    <span class="text-sm text-gray-600">Total Q&A pairs: </span>
+                    <span id="qaCount" class="font-semibold">0</span>
+                </div>
+                <button onclick="loadQAPreview()" class="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">Refresh</button>
+            </div>
+        </div>
+        
+        <!-- Error Message -->
+        <div id="errorMsg" class="hidden bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded"></div>
+        
+        <!-- Loading Message -->
+        <div id="loadingMsg" class="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded">
+            Loading Q&A pairs...
+        </div>
+        
+        <!-- Q&A Table -->
+        <div class="bg-white p-4 rounded shadow">
+            <div class="overflow-x-auto">
+                <table class="qa-table">
+                    <thead>
+                        <tr>
+                            <th class="w-1/3">Snippet</th>
+                            <th class="w-1/3">Question</th>
+                            <th class="w-1/3">Answer</th>
+                        </tr>
+                    </thead>
+                    <tbody id="qaTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
